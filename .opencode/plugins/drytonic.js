@@ -21,7 +21,7 @@ function runTonic(root, args) {
   try {
     return spawnSync(resolveTonicBin(root), args, { encoding: "utf-8" });
   } catch {
-    return null; // gate stays out of the way when tonic is not installed
+    return { status: null }; // gate stays out of the way when tonic is not installed
   }
 }
 
