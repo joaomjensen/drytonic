@@ -13,6 +13,11 @@ from drytonic.config import (
     ConfigError,
     load_config,
 )
+from drytonic.guard import (
+    DisputeError,
+    create_dispute,
+    evaluate_guard,
+)
 
 IGNORE_PATTERN = re.compile(r"#\s*tonic-ignore\s+(TN\d{3})\s*:\s*(.{5,})")
 IGNORED_DIRS = {".venv", "__pycache__"}
@@ -122,9 +127,83 @@ def cmd_init(root_dir: Path) -> int:
     return 0
 
 
+def cmd_guard(target: Path) -> int:
+    """Bloqueia governança e testes protegidos usando a regra centralizada."""
+    try:
+        bloqueado, categoria, motivo = evaluate_guard(target, config_root_for(target))
+    except ConfigError as err:
+        print(f"Erro de configuração: {err}", file=sys.stderr)
+        return 1
+
+    if bloqueado:
+        print(f"[DRYTONIC GUARD:{categoria}] {motivo}", file=sys.stderr)
+        return 2
+
+    print("OK")
+    return 0
+
+
+DISPUTE_OPTIONS = {
+    "--reason": "motivo",
+    "--motivo": "motivo",
+    "--proposal": "proposta",
+    "--proposta": "proposta",
+}
+
+
+def parse_dispute_args(args: list[str]) -> tuple[Path, str, str]:
+    """Extrai arquivo de teste, motivo e proposta dos argumentos da CLI."""
+    if not args:
+        raise ValueError("informe o caminho do arquivo de teste.")
+
+    test_path = Path(args[0])
+    values: dict[str, str] = {}
+    index = 1
+    while index < len(args):
+        flag = args[index]
+        field = DISPUTE_OPTIONS.get(flag)
+        if field is None:
+            raise ValueError(f"opção desconhecida: {flag}")
+        if index + 1 >= len(args):
+            raise ValueError(f"falta o valor da opção {flag}")
+        values[field] = args[index + 1]
+        index += 2
+
+    for field, flag in (("motivo", "--reason"), ("proposta", "--proposal")):
+        if field not in values:
+            raise ValueError(f"falta a opção obrigatória {flag}")
+
+    return test_path, values["motivo"], values["proposta"]
+
+
+def cmd_dispute(args: list[str]) -> int:
+    """Cria um documento de disputa para um teste protegido."""
+    try:
+        test_path, reason, proposal = parse_dispute_args(args)
+    except ValueError as err:
+        print(f"Erro: {err}", file=sys.stderr)
+        print(
+            'Uso: tonic dispute <arquivo_teste> --reason "<motivo>" --proposal "<proposta>"',
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        dispute_path = create_dispute(test_path, reason, proposal, config_root_for(test_path))
+    except (DisputeError, ConfigError) as err:
+        print(f"Erro ao criar disputa: {err}", file=sys.stderr)
+        return 1
+
+    print(dispute_path)
+    return 0
+
+
 def main() -> None:
     if len(sys.argv) < 2:
-        print("Uso: tonic <init|check> [arquivo.py|diretorio]", file=sys.stderr)
+        print(
+            'Uso: tonic <init|check|guard|dispute> [arquivo.py|diretorio]',
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     command = sys.argv[1]
@@ -162,6 +241,15 @@ def main() -> None:
         if files:
             print(f"OK: {len(files)} arquivo(s) passou(ram) nas regras ativas.")
         sys.exit(0)
+
+    if command == "guard":
+        if len(sys.argv) < 3:
+            print("Erro: informe o caminho do arquivo a ser verificado.", file=sys.stderr)
+            sys.exit(1)
+        sys.exit(cmd_guard(Path(sys.argv[2])))
+
+    if command == "dispute":
+        sys.exit(cmd_dispute(sys.argv[2:]))
 
     print(f"Comando desconhecido: {command}", file=sys.stderr)
     sys.exit(1)

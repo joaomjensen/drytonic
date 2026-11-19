@@ -1,57 +1,74 @@
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 const WRITE_TOOLS = new Set(["edit", "write", "patch", "multiedit"]);
+const PLUGIN_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 
 function extractFilePath(input, output) {
   return (
-    input?.args?.filePath ??
-    input?.args?.path ??
     output?.args?.filePath ??
     output?.args?.path ??
+    input?.args?.filePath ??
+    input?.args?.path ??
     ""
   );
 }
 
-function isProtectedTest(absPath) {
-  const base = path.basename(absPath);
-  const isTestName =
-    (base.startsWith("test_") && base.endsWith(".py")) ||
-    base.endsWith("_test.py");
-  return isTestName && fs.existsSync(absPath);
-}
+export default {
+  id: "drytonic",
+  setup: async (ctx) => {
+    const root = typeof ctx?.directory === "string" ? ctx.directory : PLUGIN_ROOT;
+    const tonicBin = path.join(root, ".venv", "bin", "tonic");
 
-export const DrytonicPlugin = async ({ $, directory }) => {
-  const root = directory || process.cwd();
-  const tonicBin = path.join(root, ".venv", "bin", "tonic");
+    return {
+      "tool.execute.before": async (input, output) => {
+        if (!WRITE_TOOLS.has(input?.tool)) return;
+        const rawPath = extractFilePath(input, output);
+        if (!rawPath) return;
 
-  return {
-    "tool.execute.before": async (input, output) => {
-      if (!WRITE_TOOLS.has(input?.tool)) return;
-      const rawPath = extractFilePath(input, output);
-      if (!rawPath) return;
+        const absPath = path.resolve(root, rawPath);
+        if (!fs.existsSync(tonicBin)) return;
 
-      const absPath = path.resolve(root, rawPath);
-      if (isProtectedTest(absPath)) {
-        throw new Error(
-          `[DRYTONIC SPEC LOCK] Edição bloqueada em '${rawPath}'. Arquivos de teste existentes são contratos imutáveis. Se a especificação estiver incorreta, abra uma disputa com 'tonic dispute'.`
-        );
-      }
-    },
+        // A decisão é do CLI Python; o plugin apenas interpreta o resultado.
+        const res = spawnSync(tonicBin, ["guard", absPath], {
+          encoding: "utf-8",
+        });
+        if (res.status !== 2) return;
 
-    "tool.execute.after": async (input, output) => {
-      if (!WRITE_TOOLS.has(input?.tool)) return;
-      const rawPath = extractFilePath(input, output);
-      if (!rawPath || !rawPath.endsWith(".py")) return;
+        const diagnostic = `${res.stderr ?? ""}${res.stdout ?? ""}`;
+        const isGovernance = diagnostic.includes("GUARD:governance");
+        const isExistingTest =
+          diagnostic.includes("GUARD:test") && fs.existsSync(absPath);
 
-      const absPath = path.resolve(root, rawPath);
-      if (!fs.existsSync(absPath) || !fs.existsSync(tonicBin)) return;
+        // Governança é bloqueada mesmo em arquivos novos; testes novos podem ser criados.
+        if (isGovernance || isExistingTest) {
+          throw new Error(
+            `[DRYTONIC GUARD] Edição bloqueada em '${rawPath}'.\n${diagnostic.trim()}`
+          );
+        }
+      },
 
-      const result = await $`${tonicBin} check ${absPath}`.nothrow().quiet();
-      if (result.exitCode !== 0) {
-        const diagnostic = result.stderr.toString().trim();
-        output.output = `${output.output}\n\n[DRYTONIC GATE BLOQUEOU O ARQUIVO - CORRIJA IMEDIATAMENTE]\n${diagnostic}`;
-      }
-    },
-  };
+      "tool.execute.after": async (input, output) => {
+        if (!WRITE_TOOLS.has(input?.tool)) return;
+        const rawPath = extractFilePath(input, output);
+        if (!rawPath || !rawPath.endsWith(".py")) return;
+
+        const absPath = path.resolve(root, rawPath);
+        if (!fs.existsSync(absPath) || !fs.existsSync(tonicBin)) return;
+
+        const res = spawnSync(tonicBin, ["check", absPath], {
+          encoding: "utf-8",
+        });
+
+        if (res.status === 0) {
+          output.output = `${output.output ?? ""}\n[drytonic] OK: ${path.basename(absPath)} verificado sem violações.`;
+        } else {
+          const diagnostic = (res.stderr || res.stdout || "").trim();
+          output.output = `${output.output ?? ""}\n\n[DRYTONIC GATE BLOQUEOU O ARQUIVO - CORRIJA IMEDIATAMENTE]\n${diagnostic}`;
+        }
+      },
+    };
+  },
 };
