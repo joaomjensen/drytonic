@@ -222,7 +222,7 @@ def main() -> None:
             sys.exit(f"Erro de configuração: {err}")
 
         enabled_rules = set(config["rules"])
-        rules_file = Path(__file__).resolve().parents[2] / "rules/python/tn001_to_tn006.yml"
+        rules_file = Path(__file__).resolve().parent / "rules/python/tn001_to_tn006.yml"
         rules = [
             rule_doc
             for rule_doc in load_rules(rules_file)
