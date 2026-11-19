@@ -8,6 +8,7 @@ from ast_grep_py import SgRoot
 
 from drytonic.config import (
     CONFIG_RELATIVE_PATH,
+    DEFAULT_ALLOW_AGENT_IGNORE,
     DEFAULT_PROTECTED_TEST_GLOBS,
     DEFAULT_RULES,
     ConfigError,
@@ -39,7 +40,9 @@ def has_valid_ignore(lines: list[str], line_idx: int, rule_id: str) -> bool:
     return False
 
 
-def check_file(target: Path, rules: list[dict]) -> list[str]:
+def check_file(
+    target: Path, rules: list[dict], allow_ignore: bool = True
+) -> list[str]:
     source = target.read_text(encoding="utf-8")
     lines = source.splitlines()
     root = SgRoot(source, "python").root()
@@ -52,15 +55,24 @@ def check_file(target: Path, rules: list[dict]) -> list[str]:
 
         for node in root.find_all(config):
             start = node.range().start
-            if has_valid_ignore(lines, start.line, rule_doc["id"]):
+            ignored = has_valid_ignore(lines, start.line, rule_doc["id"])
+            if allow_ignore and ignored:
                 continue
+
+            reason = rule_doc["message"]
+            if not allow_ignore:
+                reason += (
+                    " allow_agent_ignore: false exige revisão humana para exceções."
+                )
+                if ignored:
+                    reason += " O comentário # tonic-ignore não foi aceito."
 
             snippet = "\n│  ".join(node.text().splitlines()[:4])
             remediation = "\n│  ".join(rule_doc["remediation"].strip().splitlines())
             diagnostics.append(
                 f"[{rule_doc['id']}] {rule_doc['name']} em {target}:{start.line + 1}:{start.column + 1}\n"
                 f"├─ Trecho bloqueado:\n│  {snippet}\n"
-                f"├─ Motivo:\n│  {rule_doc['message']}\n"
+                f"├─ Motivo:\n│  {reason}\n"
                 f"└─ Como corrigir:\n│  {remediation}"
             )
     return diagnostics
@@ -97,6 +109,7 @@ def cmd_init(root_dir: Path) -> int:
                 {
                     "protected_test_globs": list(DEFAULT_PROTECTED_TEST_GLOBS),
                     "rules": list(DEFAULT_RULES),
+                    "allow_agent_ignore": DEFAULT_ALLOW_AGENT_IGNORE,
                 },
                 indent=2,
             )
@@ -201,7 +214,7 @@ def cmd_dispute(args: list[str]) -> int:
 def main() -> None:
     if len(sys.argv) < 2:
         print(
-            'Uso: tonic <init|check|guard|dispute> [arquivo.py|diretorio]',
+            'Uso: tonic <init|check|guard|dispute> [arquivo.py|diretorio ...]',
             file=sys.stderr,
         )
         sys.exit(1)
@@ -212,15 +225,19 @@ def main() -> None:
 
     if command == "check":
         if len(sys.argv) < 3:
-            print("Erro: informe o caminho de um arquivo ou diretório Python.", file=sys.stderr)
+            print(
+                "Erro: informe um ou mais caminhos de arquivos ou diretórios Python.",
+                file=sys.stderr,
+            )
             sys.exit(1)
 
-        target = Path(sys.argv[2])
+        targets = [Path(arg) for arg in sys.argv[2:]]
         try:
-            config = load_config(config_root_for(target))
+            config = load_config(config_root_for(targets[0]))
         except ConfigError as err:
             sys.exit(f"Erro de configuração: {err}")
 
+        allow_ignore = config.get("allow_agent_ignore", DEFAULT_ALLOW_AGENT_IGNORE)
         enabled_rules = set(config["rules"])
         rules_file = Path(__file__).resolve().parent / "rules/python/tn001_to_tn006.yml"
         rules = [
@@ -229,13 +246,26 @@ def main() -> None:
             if rule_doc["id"] in enabled_rules
         ]
 
-        files = collect_python_files(target)
+        files: list[Path] = []
+        seen: set[Path] = set()
+        for target in targets:
+            for file_path in collect_python_files(target):
+                resolved = file_path.resolve()
+                if resolved in seen:
+                    continue
+                seen.add(resolved)
+                files.append(file_path)
+
         errors: list[str] = []
         for file_path in files:
-            errors.extend(check_file(file_path, rules))
+            errors.extend(check_file(file_path, rules, allow_ignore))
 
         if errors:
             print("\n\n".join(errors), file=sys.stderr)
+            print(
+                f"{len(errors)} violação(ões) em {len(files)} arquivo(s) verificado(s).",
+                file=sys.stderr,
+            )
             sys.exit(2)
 
         if files:
