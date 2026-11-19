@@ -1,0 +1,111 @@
+id: TN001
+name: Empty Catch
+severity: error
+message: "Capturar erro sem corpo silencia falhas em TypeScript/JavaScript."
+remediation: |
+  1. Trate o erro, relance-o ou retorne um resultado explícito de falha.
+  2. Se o descarte for intencional, justifique na linha anterior: `// tonic-ignore TN001: <motivo>`
+rule:
+  any:
+    - pattern:
+        context: |
+          try {
+            void 0;
+          } catch ($ERR) {}
+        selector: catch_clause
+    - pattern:
+        context: |
+          try {
+            void 0;
+          } catch {}
+        selector: catch_clause
+---
+id: TN002
+name: Log-and-Swallow
+severity: error
+message: "Registrar log dentro de catch sem relançar ou retornar erro interrompe o fluxo de falha."
+remediation: |
+  1. Relance após logar (`throw err`) ou retorne um objeto de erro explícito.
+  2. Justifique telemetria não-bloqueante: `// tonic-ignore TN002: <motivo>`
+rule:
+  kind: catch_clause
+  all:
+    - has:
+        stopBy: end
+        any:
+          - pattern: console.log($$$)
+          - pattern: console.error($$$)
+          - pattern: console.warn($$$)
+    - not:
+        has:
+          stopBy: end
+          any:
+            - kind: throw_statement
+            - kind: return_statement
+---
+id: TN003
+name: Silent Fallback Return
+severity: error
+message: "Retornar valor vazio (null, undefined, false, [], {}, '', \"\") dentro de catch mascara erro como dado válido."
+remediation: |
+  1. Propague o erro ou retorne um tipo discriminado de falha.
+  2. Se o fallback vazio for contrato explícito, justifique: `// tonic-ignore TN003: <motivo>`
+rule:
+  kind: catch_clause
+  has:
+    stopBy: end
+    pattern: return $VAL
+constraints:
+  VAL:
+    regex: "^(null|undefined|false|\\[\\]|\\{\\}|''|\"\")$"
+---
+id: TN004
+name: Contextless Rethrow
+severity: error
+message: "Relançar `new Error(...)` dentro de catch sem `{ cause: err }` apaga a causa original."
+remediation: |
+  1. Encadeie a causa: `throw new AppError('...', { cause: err })`.
+  2. Justifique caso a quebra de contexto seja intencional: `// tonic-ignore TN004: <motivo>`
+rule:
+  kind: catch_clause
+  has:
+    stopBy: end
+    kind: throw_statement
+    pattern: throw new $ERR($$$ARGS)
+    not:
+      has:
+        stopBy: end
+        any:
+          - kind: object
+            regex: "\\bcause\\s*:"
+          - pattern: "{ cause: $CAUSE }"
+---
+id: TN005
+name: Unsafe Catch Type
+severity: error
+message: "Anotar o erro capturado como `any` desativa a checagem de tipos justamente no caminho de falha."
+remediation: |
+  1. Use `unknown` e faça narrowing antes de acessar o erro (`err instanceof Error`).
+  2. Se a biblioteca não tipa o erro, justifique: `// tonic-ignore TN005: <motivo>`
+rule:
+  pattern:
+    context: |
+      try {
+        void 0;
+      } catch ($ERR: any) {
+        $$$BODY
+      }
+    selector: catch_clause
+---
+id: TN006
+name: Loop Silent Continue
+severity: error
+message: "Usar `continue` dentro de catch descarta itens com falha silenciosamente em processamento em lote."
+remediation: |
+  1. Colete as falhas em uma lista explícita ou interrompa o lote.
+  2. Justifique o descarte desejado: `// tonic-ignore TN006: <motivo>`
+rule:
+  kind: catch_clause
+  has:
+    stopBy: end
+    kind: continue_statement

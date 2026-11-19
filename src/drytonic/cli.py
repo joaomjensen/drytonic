@@ -19,9 +19,26 @@ from drytonic.guard import (
     create_dispute,
     evaluate_guard,
 )
+from drytonic.templates import render_claude_settings, render_opencode_plugin
 
-IGNORE_PATTERN = re.compile(r"#\s*tonic-ignore\s+(TN\d{3})\s*:\s*(.{5,})")
-IGNORED_DIRS = {".venv", "__pycache__"}
+# Tanto Python (#) quanto TypeScript/JavaScript (//) usam a mesma sintaxe de
+# justificativa auditorável: `tonic-ignore TN00X: <motivo>`.
+IGNORE_PATTERN = re.compile(r"(?:#|//)\s*tonic-ignore\s+(TN\d{3})\s*:\s*(.{5,})")
+IGNORED_DIRS = {".venv", "__pycache__", "node_modules", "dist", ".next"}
+
+LANGUAGE_BY_SUFFIX = {
+    ".py": "python",
+    ".ts": "typescript",
+    ".tsx": "tsx",
+    ".js": "javascript",
+    ".jsx": "javascript",
+}
+RULES_FILE_BY_LANGUAGE = {
+    "python": "rules/python/tn001_to_tn006.yml",
+    "typescript": "rules/typescript/tn001_to_tn006.yml",
+    "tsx": "rules/typescript/tn001_to_tn006.yml",
+    "javascript": "rules/typescript/tn001_to_tn006.yml",
+}
 
 
 def load_rules(rules_path: Path) -> list[dict]:
@@ -40,12 +57,20 @@ def has_valid_ignore(lines: list[str], line_idx: int, rule_id: str) -> bool:
     return False
 
 
+def language_for(path: Path) -> str | None:
+    """Gramática ast-grep correspondente à extensão do arquivo, se suportada."""
+    return LANGUAGE_BY_SUFFIX.get(path.suffix.lower())
+
+
 def check_file(
-    target: Path, rules: list[dict], allow_ignore: bool = True
+    target: Path,
+    rules: list[dict],
+    allow_ignore: bool = True,
+    language: str = "python",
 ) -> list[str]:
     source = target.read_text(encoding="utf-8")
     lines = source.splitlines()
-    root = SgRoot(source, "python").root()
+    root = SgRoot(source, language).root()
     diagnostics: list[str] = []
 
     for rule_doc in rules:
@@ -65,7 +90,7 @@ def check_file(
                     " allow_agent_ignore: false exige revisão humana para exceções."
                 )
                 if ignored:
-                    reason += " O comentário # tonic-ignore não foi aceito."
+                    reason += " O comentário tonic-ignore não foi aceito."
 
             snippet = "\n│  ".join(node.text().splitlines()[:4])
             remediation = "\n│  ".join(rule_doc["remediation"].strip().splitlines())
@@ -78,16 +103,22 @@ def check_file(
     return diagnostics
 
 
-def collect_python_files(target: Path) -> list[Path]:
-    """Lista arquivos .py de um arquivo ou de um diretório, recursivamente."""
+def collect_source_files(target: Path) -> list[Path]:
+    """Lista arquivos suportados de um arquivo ou diretório, recursivamente."""
     if target.is_file():
-        return [target] if target.suffix == ".py" else []
+        return [target] if language_for(target) else []
 
     return sorted(
         path
-        for path in target.rglob("*.py")
-        if not any(part in IGNORED_DIRS for part in path.parts)
+        for path in target.rglob("*")
+        if path.is_file()
+        and language_for(path)
+        and not any(part in IGNORED_DIRS for part in path.parts)
     )
+
+
+# Nome antigo mantido como alias para não quebrar imports existentes.
+collect_python_files = collect_source_files
 
 
 def config_root_for(target: Path) -> Path:
@@ -100,8 +131,9 @@ def config_root_for(target: Path) -> Path:
 
 
 def cmd_init(root_dir: Path) -> int:
+    root_dir.mkdir(parents=True, exist_ok=True)
     tonic_dir = root_dir / ".tonic"
-    tonic_dir.mkdir(exist_ok=True)
+    tonic_dir.mkdir(parents=True, exist_ok=True)
     config_file = tonic_dir / "config.json"
     if not config_file.exists():
         config_file.write_text(
@@ -117,26 +149,20 @@ def cmd_init(root_dir: Path) -> int:
             encoding="utf-8",
         )
 
+    plugin_file = root_dir / ".opencode" / "plugins" / "drytonic.js"
+    plugin_file.parent.mkdir(parents=True, exist_ok=True)
+    plugin_file.write_text(render_opencode_plugin(), encoding="utf-8")
+
     claude_dir = root_dir / ".claude"
-    claude_dir.mkdir(exist_ok=True)
+    claude_dir.mkdir(parents=True, exist_ok=True)
     settings_file = claude_dir / "settings.json"
-    settings = {
-        "hooks": {
-            "PostToolUse": [
-                {
-                    "matcher": "Edit|Write",
-                    "hooks": [
-                        {
-                            "type": "command",
-                            "command": "tonic check \"$CLAUDE_FILE_PATHS\"",
-                        }
-                    ],
-                }
-            ]
-        }
-    }
-    settings_file.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
-    print("drytonic inicializado em .tonic/config.json e .claude/settings.json")
+    settings_file.write_text(
+        json.dumps(render_claude_settings(), indent=2) + "\n", encoding="utf-8"
+    )
+    print(
+        "drytonic inicializado em .tonic/config.json, "
+        ".opencode/plugins/drytonic.js e .claude/settings.json"
+    )
     return 0
 
 
@@ -214,7 +240,7 @@ def cmd_dispute(args: list[str]) -> int:
 def main() -> None:
     if len(sys.argv) < 2:
         print(
-            'Uso: tonic <init|check|guard|dispute> [arquivo.py|diretorio ...]',
+            'Uso: tonic <init|check|guard|dispute> [arquivo.{py,ts,tsx,js,jsx}|diretorio ...]',
             file=sys.stderr,
         )
         sys.exit(1)
@@ -226,7 +252,7 @@ def main() -> None:
     if command == "check":
         if len(sys.argv) < 3:
             print(
-                "Erro: informe um ou mais caminhos de arquivos ou diretórios Python.",
+                "Erro: informe um ou mais arquivos (.py, .ts, .tsx, .js, .jsx) ou diretórios.",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -239,17 +265,24 @@ def main() -> None:
 
         allow_ignore = config.get("allow_agent_ignore", DEFAULT_ALLOW_AGENT_IGNORE)
         enabled_rules = set(config["rules"])
-        rules_file = Path(__file__).resolve().parent / "rules/python/tn001_to_tn006.yml"
-        rules = [
-            rule_doc
-            for rule_doc in load_rules(rules_file)
-            if rule_doc["id"] in enabled_rules
-        ]
+        rules_dir = Path(__file__).resolve().parent
+        rules_by_file: dict[str, list[dict]] = {
+            relative_path: [
+                rule_doc
+                for rule_doc in load_rules(rules_dir / relative_path)
+                if rule_doc["id"] in enabled_rules
+            ]
+            for relative_path in set(RULES_FILE_BY_LANGUAGE.values())
+        }
+        rules_by_language = {
+            language: rules_by_file[relative_path]
+            for language, relative_path in RULES_FILE_BY_LANGUAGE.items()
+        }
 
         files: list[Path] = []
         seen: set[Path] = set()
         for target in targets:
-            for file_path in collect_python_files(target):
+            for file_path in collect_source_files(target):
                 resolved = file_path.resolve()
                 if resolved in seen:
                     continue
@@ -258,7 +291,14 @@ def main() -> None:
 
         errors: list[str] = []
         for file_path in files:
-            errors.extend(check_file(file_path, rules, allow_ignore))
+            language = language_for(file_path)
+            if language is None:
+                continue
+            errors.extend(
+                check_file(
+                    file_path, rules_by_language[language], allow_ignore, language
+                )
+            )
 
         if errors:
             print("\n\n".join(errors), file=sys.stderr)

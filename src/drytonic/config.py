@@ -6,7 +6,18 @@ from typing import Any
 
 CONFIG_RELATIVE_PATH = Path(".tonic") / "config.json"
 
-DEFAULT_PROTECTED_TEST_GLOBS: list[str] = ["**/test_*.py", "**/*_test.py"]
+DEFAULT_PROTECTED_TEST_GLOBS: list[str] = [
+    "**/test_*.py",
+    "**/*_test.py",
+    "**/*.test.ts",
+    "**/*.spec.ts",
+    "**/*.test.tsx",
+    "**/*.spec.tsx",
+    "**/*.test.js",
+    "**/*.spec.js",
+    "**/*.test.jsx",
+    "**/*.spec.jsx",
+]
 DEFAULT_RULES: list[str] = ["TN001", "TN002", "TN003", "TN004", "TN005", "TN006"]
 DEFAULT_ALLOW_AGENT_IGNORE: bool = True
 
