@@ -1,0 +1,143 @@
+id: TN001
+name: Bare or Empty Except
+severity: error
+message: "Capturar exceção sem tipo ou silenciar com pass/ellipsis oculta falhas."
+remediation: |
+  1. Capture exceções específicas (ex: `except ValueError as err:`) e trate ou propague.
+  2. Se a falha for intencional, justifique na linha anterior: `# tonic-ignore TN001: <motivo>`
+rule:
+  any:
+    - pattern:
+        context: |
+          try:
+            pass
+          except:
+            $$$BODY
+        selector: except_clause
+    - pattern:
+        context: |
+          try:
+            pass
+          except $ERR:
+            pass
+        selector: except_clause
+    - pattern:
+        context: |
+          try:
+            pass
+          except $ERR:
+            ...
+        selector: except_clause
+---
+id: TN002
+name: Log-and-Swallow
+severity: error
+message: "Registrar log dentro de except sem relançar ou retornar erro interrompe o fluxo de falha."
+remediation: |
+  1. Relance a exceção após logar (`raise`) ou retorne um objeto de erro explícito.
+  2. Justifique caso seja telemetria não-bloqueante: `# tonic-ignore TN002: <motivo>`
+rule:
+  kind: except_clause
+  all:
+    - has:
+        stopBy: end
+        any:
+          - pattern: print($$$)
+          - pattern: $LOG.error($$$)
+          - pattern: $LOG.exception($$$)
+          - pattern: $LOG.warning($$$)
+    - not:
+        has:
+          stopBy: end
+          any:
+            - kind: raise_statement
+            - kind: return_statement
+            - pattern: sys.exit($$$)
+---
+id: TN003
+name: Silent Fallback Return
+severity: error
+message: "Retornar valor vazio (None, [], {}, False, '') dentro de except mascara erro de infraestrutura como dado válido."
+remediation: |
+  1. Propague a exceção ou retorne um tipo discriminado de falha.
+  2. Se o fallback vazio for contrato explícito, justifique: `# tonic-ignore TN003: <motivo>`
+rule:
+  kind: except_clause
+  has:
+    stopBy: end
+    pattern: return $VAL
+constraints:
+  VAL:
+    regex: "^(None|False|\\[\\]|\\{\\}|''|\"\")$"
+---
+id: TN004
+name: Contextless Raise
+severity: error
+message: "Relançar nova exceção dentro de except sem 'from err' apaga o traceback original."
+remediation: |
+  1. Encadeie a causa raiz: `raise NovoErro("...") from err` (ou `from None` se intencional).
+rule:
+  kind: except_clause
+  has:
+    stopBy: end
+    kind: raise_statement
+    pattern: raise $CALL($$$ARGS)
+    not:
+      pattern: raise $CALL($$$ARGS) from $CAUSE
+---
+id: TN005
+name: Broad Exception Swallow
+severity: error
+message: "Capturar Exception ou BaseException sem relançar engole erros inesperados de programação."
+remediation: |
+  1. Restrinja o except às exceções esperadas da operação (ex: `OSError`, `KeyError`).
+  2. Se precisar capturar `Exception` na borda do sistema, relance com `raise`.
+rule:
+  kind: except_clause
+  all:
+    - any:
+        - pattern:
+            context: |
+              try:
+                pass
+              except Exception:
+                $$$BODY
+            selector: except_clause
+        - pattern:
+            context: |
+              try:
+                pass
+              except Exception as $E:
+                $$$BODY
+            selector: except_clause
+        - pattern:
+            context: |
+              try:
+                pass
+              except BaseException:
+                $$$BODY
+            selector: except_clause
+        - pattern:
+            context: |
+              try:
+                pass
+              except BaseException as $E:
+                $$$BODY
+            selector: except_clause
+    - not:
+        has:
+          stopBy: end
+          kind: raise_statement
+---
+id: TN006
+name: Loop Silent Continue
+severity: error
+message: "Usar 'continue' dentro de except descarta itens com falha silenciosamente em processamento em lote."
+remediation: |
+  1. Colete os erros em uma lista explícita de falhas ou interrompa o lote.
+  2. Justifique caso o descarte silencioso seja desejado: `# tonic-ignore TN006: <motivo>`
+rule:
+  kind: except_clause
+  has:
+    stopBy: end
+    kind: continue_statement
