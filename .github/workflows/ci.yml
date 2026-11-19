@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test-and-lint:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install drytonic
+        run: pip install -e ".[dev]"
+
+      - name: Run unit tests
+        run: pytest -v
+
+      - name: Dogfood drytonic gate on codebase
+        run: tonic check src tests
+
+  wheel-smoke-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build and verify wheel outside repo
+        run: |
+          pip install build
+          python -m build --wheel --outdir dist
+          pip install --force-reinstall dist/*.whl
+          mkdir -p /tmp/drytonic-smoke && cd /tmp/drytonic-smoke
+          tonic init
+          tonic check .

@@ -4,7 +4,26 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const WRITE_TOOLS = new Set(["edit", "write", "patch", "multiedit"]);
+const SUPPORTED_EXTENSIONS = new Set([".py", ".ts", ".tsx", ".js", ".jsx"]);
 const PLUGIN_ROOT = fileURLToPath(new URL("../../", import.meta.url));
+
+// callID correlates tool.execute.before (guard) with tool.execute.after (check).
+const edits = new Map();
+
+function resolveTonicBin(root) {
+  // Prefer the project binary at .venv/bin/tonic; fall back to `tonic` on PATH.
+  const local = path.join(root, ".venv", "bin", "tonic");
+  if (fs.existsSync(local)) return local;
+  return "tonic"; // fallback: tonic available on PATH
+}
+
+function runTonic(root, args) {
+  try {
+    return spawnSync(resolveTonicBin(root), args, { encoding: "utf-8" });
+  } catch {
+    return null; // gate stays out of the way when tonic is not installed
+  }
+}
 
 function extractFilePath(input, output) {
   return (
@@ -16,11 +35,18 @@ function extractFilePath(input, output) {
   );
 }
 
+function callID(input, output) {
+  return input?.callID ?? output?.callID ?? null;
+}
+
+function isSupported(absPath) {
+  return SUPPORTED_EXTENSIONS.has(path.extname(absPath).toLowerCase());
+}
+
 export default {
   id: "drytonic",
   setup: async (ctx) => {
     const root = typeof ctx?.directory === "string" ? ctx.directory : PLUGIN_ROOT;
-    const tonicBin = path.join(root, ".venv", "bin", "tonic");
 
     return {
       "tool.execute.before": async (input, output) => {
@@ -29,21 +55,22 @@ export default {
         if (!rawPath) return;
 
         const absPath = path.resolve(root, rawPath);
-        if (!fs.existsSync(tonicBin)) return;
+        const id = callID(input, output);
+        const record = { absPath, blocked: false };
+        if (id !== null) edits.set(id, record);
 
-        // A decisão é do CLI Python; o plugin apenas interpreta o resultado.
-        const res = spawnSync(tonicBin, ["guard", absPath], {
-          encoding: "utf-8",
-        });
-        if (res.status !== 2) return;
+        // The decision belongs to the Python CLI; the plugin only interprets it.
+        const res = runTonic(root, ["guard", absPath]);
+        if (!res || res.status !== 2) return;
 
         const diagnostic = `${res.stderr ?? ""}${res.stdout ?? ""}`;
         const isGovernance = diagnostic.includes("GUARD:governance");
         const isExistingTest =
           diagnostic.includes("GUARD:test") && fs.existsSync(absPath);
 
-        // Governança é bloqueada mesmo em arquivos novos; testes novos podem ser criados.
+        // Governance is blocked even for new files; new tests may be created.
         if (isGovernance || isExistingTest) {
+          record.blocked = true;
           throw new Error(
             `[DRYTONIC GUARD] Edição bloqueada em '${rawPath}'.\n${diagnostic.trim()}`
           );
@@ -51,16 +78,20 @@ export default {
       },
 
       "tool.execute.after": async (input, output) => {
-        if (!WRITE_TOOLS.has(input?.tool)) return;
+        if (!WRITE_TOOLS.has(input?.tool) || !output) return;
+
+        const id = callID(input, output);
+        const record = id !== null ? edits.get(id) : null;
+        if (id !== null) edits.delete(id);
+        if (record?.blocked) return;
+
         const rawPath = extractFilePath(input, output);
-        if (!rawPath || !rawPath.endsWith(".py")) return;
+        const absPath =
+          record?.absPath ?? (rawPath ? path.resolve(root, rawPath) : "");
+        if (!absPath || !isSupported(absPath) || !fs.existsSync(absPath)) return;
 
-        const absPath = path.resolve(root, rawPath);
-        if (!fs.existsSync(absPath) || !fs.existsSync(tonicBin)) return;
-
-        const res = spawnSync(tonicBin, ["check", absPath], {
-          encoding: "utf-8",
-        });
+        const res = runTonic(root, ["check", absPath]);
+        if (!res) return;
 
         if (res.status === 0) {
           output.output = `${output.output ?? ""}\n[drytonic] OK: ${path.basename(absPath)} verificado sem violações.`;
